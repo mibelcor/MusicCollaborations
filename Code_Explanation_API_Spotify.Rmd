@@ -1,0 +1,436 @@
+---
+title: "Spotify API Explanation"
+author: "Mireia Belda Cortés"
+date: "2024-08-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# INTRODUCTION
+
+The following steps are designed to access the Spotify API to extract the IDs of unique artists and their genres. The process will be explained **step by step** to guide you through accessing the API and extracting the necessary data. Please follow each step carefully to ensure accurate results.The first step is loading all the necessary libraries:
+
+```{r}
+
+library(tidyverse)
+library(httr2)
+library(httr)
+library(ggplot2)
+library(jsonlite)
+library(xml2)
+library(stringr)
+library(stringdist)
+library(stargazer)
+library(plotly)
+#install.packages("dotenv") Make sure you have downloaded this library
+library(dotenv)
+library(fmsb)
+library(data.table)
+library(igraph)
+library(tidyr)
+library(viridis)
+library(rjson)
+library(reshape2)
+library(RColorBrewer)
+library(sf)
+library(rnaturalearth)
+library(scrapex)
+library(tm)
+library(tibble)
+library(rvest)
+
+```
+
+# 2. SPOTIFY API
+
+First, we will need a data frame containing the names of all unique artists who have appeared on Los 40 charts in collaborative songs from 2006 to the present. For our case, the file with the artists is extracted from the cleaned database obtained from the Los 40 API. You can find it directly in the **attached folders** (`df_artistas_unicos`).
+
+So once you have downloaded the file, we import it:
+
+```{r}
+
+df <- read.csv("df_artistas_unicos.csv")
+```
+
+If you want to extract genres for other artists, simply import the database that includes a column labeled "Artistas" with the names of the artists.
+
+## 2.1. PREVIOUS STEPS
+
+Once we have identified the artists whose genres we want to retrieve, we need to access the Spotify API. To use the Spotify API, there are several steps we must follow:
+
+1.  Sign up for or log in to a **Spotify Developer Account.**
+
+2.  After logging in, you need to create "**your app**." To do this, navigate to the Dashboard, click on "Create an app," enter the name you want for your app, along with the necessary details and the Redirect URI (e.g: <http://localhost:8080>). Once you accept the terms of service and create it, your app will be registered.
+
+3.  In the Dashboard under your app, go to Settings. There, you will find your **Client ID** and **Client Secret**.
+
+4.  With these codes, you need to create a new text file named "**.env**." Inside this file, include the following lines, writing your actually ClientID and ClientSecret:
+
+    ```         
+    client_id=YourClientID client_secret=YourClientSecret
+    ```
+
+5.  Once the file is created, **save it in the same folder where this script is located.**
+
+## 2.2. REQUEST AND ACCESS TOKEN
+
+Before running this code, you have to be sure that the directory established where you have saved the "`.env`" text file. Once we have the text file named "`.env`", we have to process it through R:
+
+```{r}
+
+dotenv::load_dot_env()
+client_ID <- Sys.getenv("client_id")
+client_secret <- Sys.getenv("client_secret")
+```
+
+Now, we can get the access token which contains the credentials and permissions for having access to different types of data that Spotify offers.
+
+```{r}
+
+URL <- "https://accounts.spotify.com/api/token"
+
+
+token_req <- POST(
+  URL,
+  accept_json(),
+  authenticate(client_ID, client_secret), 
+  body = list(grant_type = 'client_credentials'),
+  encode = 'form'
+)
+
+
+```
+
+This next code is displaying the content of the response from an `API request` and checking the HTTP status code to determine if the request was successful or if there was an error. If it shows "200" this means that the request was successful and you can continue with the extraction.
+
+```{r}
+
+cat("Content of the reply:\n")
+cat(rawToChar(token_req$content), "\n")
+
+status_code <- status_code(token_req)
+cat("Status code:", status_code, "\n")
+```
+
+The next step is converting the raw content of the API response into a JSON format using `fromJSON.` Once we have this, we are extracting the `access_token` from the response and storing it in the variable `token`.
+
+```{r}
+token_content <- fromJSON(rawToChar(token_req$content))
+token <- token_content$access_token
+#print(token) if you want to see the token
+```
+
+Finally, we set up a request to the Spotify API by specifying the base URL, adding our authentication token, and configuring the request to retry up to 5 times if it fails. We also throttle the request rate to 20 per second, set a timeout of 20 seconds.
+
+```{r}
+spotify_req <- "https://api.spotify.com/v1"
+
+req <- request(spotify_req) |> 
+  req_auth_bearer_token(token) |> 
+  req_retry(max_tries = 5) |> 
+  req_throttle(rate = 20) |> 
+  req_timeout(20000) |> 
+  req_headers("Content-type" = "*/*")
+```
+
+## 2.3. ID AND GENRE EXTRACTION
+
+-   ID Extraction
+
+In the Spotify API, you can't retrieve characteristics like an artist's genre using their name directly; instead, you need their unique Spotify ID. That's why the first step is to extract the artists' IDs from Spotify. To do this, we create a specific function. If the response status indicates success, we convert the response content from raw format to a character string and check if it's valid JSON. If the JSON is valid, we parse it and check if there are any results. If no artist is found, we return `NA`, but if an artist is found, it extracts and returns the artist's Spotify ID.
+
+To do this, we create a specific function. We start by defining the base URL for the Spotify search API and then construct the search query using the artist's name, limiting the search to one result. Then, we make a GET request to the Spotify API, including the access token in the headers for authentication.If the response status indicates success, we convert the response content from raw format to a character string and check if it's valid JSON. If the JSON is valid, we parse it and check if there are any results. If no artist is found, we return `NA`, but if an artist is found, it extracts and returns the artist's Spotify ID.
+
+```{r}
+get_artist_id <- function(artist_name, access_token) {
+  base_url <- "https://api.spotify.com/v1/search"
+  search_query <- paste0("?q=", URLencode(artist_name), "&type=artist&limit=1")
+  search_url <- paste0(base_url, search_query)
+  
+  response <- GET(
+    search_url,
+    add_headers(Authorization = paste0("Bearer ", access_token))
+  )
+  
+  if (status_code(response) != 200) {
+    warning("Error en la búsqueda del artista: ", status_code(response), " - ", rawToChar(response$content))
+    return(NA)
+  }
+  
+  response_content <- rawToChar(response$content)
+  
+  if (!validate(response_content)) {
+    warning("La respuesta no es un JSON válido: ", response_content)
+    return(NA)
+  }
+
+  response_json <- fromJSON(response_content)
+  
+  if (length(response_json$artists$items) == 0) {
+    return(NA)  
+  } else {
+    artist_info <- response_json$artists$items[[1]]
+    return(artist_info$id)
+  }
+}
+
+```
+
+Now we create a new dataframe `artistas_totales` where we add a new column called `artist_id`. This column is populated by applying the `get_artist_id` function to each artist in the `Artista` column of the dataframe `df`. The function retrieves the Spotify ID for each artist using the provided token:
+
+```{r}
+
+artistas_totales <- df |>
+  mutate(artist_id = map(Artista, ~get_artist_id(.x, token)))
+```
+
+-   Genres Extraction
+
+Now that we have the artist IDs, we create a function to extract the genres, following the same logic as the previous function:
+
+```{r}
+get_artist_genres <- function(artist_id, access_token) {
+  base_url <- paste0("https://api.spotify.com/v1/artists/", artist_id)
+  
+  response <- GET(
+    base_url,
+    add_headers(Authorization = paste0("Bearer ", access_token))
+  )
+  
+  if (status_code(response) != 200) {
+    warning("Error en la búsqueda del artista: ", status_code(response), " - ", rawToChar(response$content))
+    return(NA)
+  }
+  
+  response_content <- rawToChar(response$content)
+  
+
+  if (!validate(response_content)) {
+    warning("La respuesta no es un JSON válido: ", response_content)
+    return(NA)
+  }
+  
+  response_json <- fromJSON(response_content)
+  
+
+  if ("genres" %in% names(response_json)) {
+    return(paste(response_json$genres, collapse = ", "))
+  } else {
+    return(NA)
+  }
+}
+
+```
+
+Now, we apply it:
+
+```{r}
+
+artistas_totales <- artistas_totales |>
+  mutate(genres = map(artist_id, ~get_artist_genres(.x, token)))
+
+```
+
+## 2.4. SOME CLEANING
+
+There are some artists to whom Spotify does not assign a genre, either because they do not exist as established artists and have only made a sporadic collaboration on a song, or because they are emerging singers who have not yet been categorized. Therefore, we check how many blank spaces values are present in the genre field.
+
+```{r}
+
+artistas_vacios <- artistas_totales |>
+  filter(str_trim(genres) == "")
+
+```
+
+For these ones, we complete them by hand, searching them:
+
+```{r}
+
+artistas_totales <- artistas_totales |>
+  mutate(genres = as.character(genres))
+
+
+
+
+artistas_totales <- artistas_totales |>
+  mutate(
+    genres = case_when(
+      Artista == "Cristina Lliso" ~ "rock espanol",
+      Artista == "David Summers" ~ "pop, rock, rock en espanol",
+      Artista == "Diego Martín" ~ "pop",
+      Artista == "Joana Zimmer" ~ "pop",
+      Artista == "Revólver" ~ "rock espanol",
+      Artista == "Chad Kroeger" ~ "rock",
+      Artista == "David Tavaré" ~ "dance, electro, pop",
+      Artista == "DCUP" ~ "dance, electro, hip hop, rap",
+      Artista == "Andreea D" ~ "dance, electro",
+      Artista == "DJ Frank E" ~ "reggae",
+      Artista == "GoonRock" ~ "pop",
+      Artista == "Mandy Santos" ~ "pop, electro, dance, indie",
+      Artista == "Mohombi" ~ "pop",
+      Artista == "Alex Ayora" ~ "pop, rock, latino",
+      Artista == "Alex Shaker" ~ "dance, electro",
+      Artista == "Antonio Ferrara" ~ "classic, flamenco, pop, rock",
+      Artista == "Lucía Scansetti" ~ "pop",
+      Artista == "DJ Nano" ~ "dance, electro",
+      Artista == "Marien Baker" ~ "dance, electro",
+      Artista == "Mario Jefferson" ~ "pop",
+      Artista == "Albert Neve" ~ "dance, electro, house, techno",
+      Artista == "Les Castizos" ~ "dance, electro",
+      Artista == "Lilly Wood" ~ "indie",
+      Artista == "Phoebe Killdeer & The Short Straws" ~ "dance, electro, pop",
+      Artista == "Sigma" ~ "electro",
+      Artista == "Abel Ramos" ~ "indie, dance, electro",
+      Artista == "Luis López" ~ "dance",
+      Artista == "YALL" ~ "indie, dance, electro",
+      Artista == "Alex da Kid" ~ "r&b, soul, jazz",
+      Artista == "Bromas Aparte" ~ "pop, rock",
+      Artista == "Anitta" ~ "funk carioca, reggaeton, latin pop, pop, funk melody",
+      Artista == "Jesús Navarro" ~ "latin pop",
+      Artista == "Andy Clay" ~ "pop",
+      Artista == "TOPIC" ~ "hip hop, rap",
+      Artista == "Hypeman" ~ "hip hop",
+      Artista == "Nicolás Reyes" ~ "flamenco, rumba, pop",
+      Artista == "Polo Nandez" ~ "pop",
+      Artista == "Vicco" ~ "pop, rock",
+      Artista == "Chanel" ~ "latin pop",
+      Artista == "Gary 'Nesta' Pine" ~ "dance, electro",
+      Artista == "Raquel del Rosarío" ~ "pop",
+      Artista == "LaMari" ~ "flamenco",
+      Artista == "Juan Aguirre" ~ "rock, folk rock",
+      Artista == "Bono" ~ "dance, electro",
+      Artista == "Colby O'Donis" ~ "r&b, soul, pop",
+      Artista == "Bob Taylor" ~ "dance",
+      Artista == "Jason Nevins" ~ "r&b,soul,dance,electro",
+      Artista == "El Cata" ~ "tropical,pop",
+      Artista == "Heléne" ~ "pop",
+      Artista == "Yotuel Romero" ~ "rap,urban",
+      Artista == "Jorge Ruiz" ~ "pop,rock",
+      Artista == "The WAV.s" ~ "dance pop",
+      Artista == "Lauren Bennett" ~ "pop",
+      Artista == "Fito Cabrales" ~ "rock,pop,blues rock",
+      Artista == "Dmol" ~ "tango electro",
+      Artista == "Tolo Servera" ~ "pop",
+      Artista == "Taped Rai" ~ "dance,electro",
+      Artista == "Shinoflow" ~ "indie,pop,tropical",
+      Artista == "Flii Stylz" ~ "hip hop,rap",
+      Artista == "Leire Martínez" ~ "pop",
+      Artista == "R. Kelly" ~ "r&b,soul,hip hop,rap",
+      Artista == "JoJo" ~ "r&b,pop",
+      Artista == "Aqeelion" ~ "hip hop,rap",
+      Artista == "Lennox" ~ "regueton",
+      Artista == "John Ryan" ~ "folk",
+      Artista == "Rameez" ~ "dance,electro,blues",
+      Artista == "Lyse" ~ "pop",
+      Artista == "Verdine White" ~ "pop",
+      Artista == "Ilsey" ~ "indie",
+      Artista == "Gabriela Richardson" ~ "dance electro,pop",
+      Artista == "Iselin Solheim" ~ "dance,electro",
+      Artista == "NYLA" ~ "dance",
+      Artista == "Dakota" ~ "pop,dance,r&b,soul",
+      Artista == "Holly Winter" ~ "electro,pop",
+      Artista == "J-Son" ~ "hip hop,rap",
+      Artista == "Snova" ~ "latin",
+      Artista == "Jay Martin" ~ "rock en espanol",
+      Artista == "Brendon Urie" ~ "pop,rock,rock alternativo",
+      Artista == "DJ FLE" ~ "hip hop,rap",
+      Artista == "Nomcebo" ~ "dance,electro",
+      Artista == "J. Rey Soul" ~ "pop",
+      Artista == "Dopamine" ~ "trip hop",
+      Artista == "Zeper" ~ "dance,electro",
+      Artista == "Mr. Rain" ~ "hip hop, rap",
+      Artista == "Mar Lucas" ~ "pop",
+      Artista == "Zecca" ~ "urbana",
+      Artista == "ATL Jacob" ~ "hip hop,rap",
+      Artista == "GARABATTO" ~ "electro,pop",
+      TRUE ~ genres 
+    )
+  )
+
+```
+
+Now, there are almost all complete, as there are always some artists that they don't have any genre related. The next step is saving the dataframe:
+
+```{r}
+write_csv(artistas_totales, "C:/Users/Concha Cortés/Desktop/Máster/Cuatrimestre 2/TFM/LISTAS POR AÑOS LOS40/bbdd_los40_géneros_mapeados.csv")
+```
+
+## 2.5. MAPPING GENRES
+
+Some of the genres extracted from Spotify are very specific and can be grouped into broader categories. To map these genres effectively, we utilize the genre database provided by Gabriel Oliveira, who has performed similar genre mapping and made the database publicly available. You can access this resource at [Gabriel Oliveira's website](https://opgabriel.github.io/ISMIR2020/). The mapping file is also included in the attached files (`spotify_genre_mapping`).
+
+Make sure that we you import the database, you choose the delimiter "tab", so that the equivalences are correct.
+
+```{r}
+
+data_mapped <- read_delim("C:/Users/Concha Cortés/Desktop/Máster/Cuatrimestre 2/TFM/LISTAS POR AÑOS LOS40/spotify_genre_mapping.csv", 
+    delim = "\t", escape_double = FALSE, 
+    trim_ws = TRUE)
+
+```
+
+First, we will ensure that the genre columns (`genres`) are of type `character` to avoid data type issues in subsequent processing.
+
+Once this is done, we create a function that takes a string of genres and the dataframe of mapped genres. This function splits the genres by commas, maps each genre to its equivalent in `mapped_genre`, and then concatenates the mapped genres.
+
+Finally, we apply this function to the `artistas_totales` dataframe, creating a new column (`mapped_genre`) with the mapped genres.
+
+```{r}
+
+# Into character 
+
+
+artistas_totales <- artistas_totales |>
+  mutate(genres = as.character(genres))
+
+data_mapped <- data_mapped |>
+  mutate(original_genre = as.character(original_genre),
+         mapped_genre = as.character(mapped_genre))
+
+
+# map_genres function
+
+map_genres <- function(genres, mapping) {
+
+  genres_list <- str_split(genres, ",\\s*")[[1]]
+  
+  # Map each equivalent genre
+  mapped <- sapply(genres_list, function(g) {
+    mapped_value <- mapping$mapped_genre[mapping$original_genre == g]
+    if (length(mapped_value) > 0) return(mapped_value)
+    return(NA) 
+  })
+  
+
+  mapped <- unique(na.omit(mapped))
+  
+
+  return(paste(mapped, collapse = ", "))
+}
+
+
+artistas_totales <- artistas_totales |>
+  rowwise() |>
+  mutate(mapped_genre = map_genres(genres, data_mapped))
+
+
+artistas_totales <- ungroup(artistas_totales)
+
+```
+
+The last step is ensuring that any columns in `artistas_totales` that are of type `list` are converted to character strings. Once we have ensured all data is in the correct format, we save `artistas_totales` dataframe to a CSV file.
+
+```{r}
+
+artistas_totales <- artistas_totales |>
+  mutate(across(where(is.list), ~ sapply(., toString)))
+
+
+write.csv(artistas_totales, "artistas_totales.csv", row.names = FALSE)
+
+```
+
+It is very important to **save the file** because it will be used to create the edge list for constructing the networks.

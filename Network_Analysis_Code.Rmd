@@ -1,0 +1,1108 @@
+---
+title: "Network Analysis"
+author: "Mireia Belda Cortés"
+date: "2024-08-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. INTRODUCTION
+
+Here's a concise version of what you want to express:
+
+------------------------------------------------------------------------
+
+In the following script, you will find the preparation for network analysis, along with the actual analysis and calculation of metrics. Since this is a fairly tedious process, it is essential to **run the code chunk by chunk to ensure accurate results.** The first step in this process is to load all the necessary libraries.
+
+```{r}
+
+library(tidyverse)
+library(httr2)
+library(httr)
+library(ggplot2)
+library(jsonlite)
+library(xml2)
+library(stringr)
+library(stringdist)
+library(stargazer)
+library(plotly)
+library(dotenv)
+library(fmsb)
+library(data.table)
+library(igraph)
+library(tidyr)
+library(viridis)
+library(rjson)
+library(reshape2)
+library(RColorBrewer)
+library(sf)
+library(rnaturalearth)
+library(scrapex)
+library(tm)
+library(tibble)
+library(rvest)
+library(corrplot)
+```
+
+Now that we have the libraries loaded, we need to import the databases that we'll be using. These databases are provided in the attached files with the following names:
+
+-   **data_los40**: A dataframe containing all songs on the Los 40 lists from 2006 to 2024.
+
+-   **artistas_totales**: A dataframe with genres for each artist, previously extracted from Spotify.
+
+```{r}
+
+data_los40 <- read.csv("data_los40_final.csv")
+artistas_totales <- read.csv("artistas_totales.csv")
+
+```
+
+We can now proceed with the pre-processing tasks.
+
+# 2. PREVIOUS STEPS
+
+To streamline subsequent actions, we'll create a directory structure on the computer where these files will be stored. This will make it easier to manage the large number of files by allowing us to apply functions to entire folders, simplifying the process as we continue with the necessary steps.
+
+```{r}
+folders <- c("los40_df",
+             "los40_df/artist_and_genre_edge_lists",
+             "los40_df/artist_and_genre_edge_lists/final_edge_lists_artists",
+             "los40_df/artist_and_genre_edge_lists/final_edge_lists_genres",
+              "los40_df/artist_and_genre_edge_lists/pre_edge_lists",
+             "los40_df/Times_on_top")
+
+
+
+for (folder in folders) {
+  if (!dir.exists(folder)) {
+    dir.create(folder, recursive = TRUE)
+  }
+}
+```
+
+Once we have the complete database and our folders created, we'll save a separate dataframe for each year in the folder "los40_df":
+
+```{r}
+
+ruta_guardado <- "los40_df/"
+
+for (year_value in unique(data_los40$year)) {
+  filtered_data <- data_los40 |>
+    filter(year == year_value)
+
+  
+  file_name <- paste0(ruta_guardado, "data_", year_value, "_los40.csv")
+  
+  write.csv(filtered_data, file_name, row.names = FALSE)
+}
+
+```
+
+# 3. EDGE- LISTS
+
+To create a network, we start with a table called an *edge list*. An edge list is a table that defines the connections between nodes in a network, where each row represents a link (or edge) between two nodes, such as collaborating artists. To generate this table, several pre-processing steps are required, including the creation of weights, the extraction of additional necessary data, and the structuring of information in a format suitable for building the network.
+
+## 3.1. ARTIST EDGE LISTS
+
+-   Times_on_top
+
+The first step is adding a new column that represents the first weight of our artist network: Times_on_top. This measures the popularity of collaborations between two artists. It quantifies the numberof times a song featuring both artists has been in the top charts during the year in question.
+
+In order to do this. We process annual CSV files of data from the Los 40 Principales charts from 2006 to 2024, that we have previously saved. For each year, we read the corresponding file from the `los40_df` directory, transform the dataframe by adding a column that counts the number of times a song has been in the top, and remove duplicates. Then, we save the transformed dataframe as a new CSV file in the `Times_on_top` folder.
+
+```{r}
+
+input_dir <- "los40_df"
+output_dir <- "los40_df/Times_on_top"
+
+transform_df <- function(df) {
+  df |>
+    group_by(song) |>
+    mutate(times_on_top = n()) |>
+    ungroup() |>
+    select(date, position, song, artists, times_on_top, everything()) |>
+    distinct(song, .keep_all = TRUE)
+}
+
+years <- 2006:2024
+
+for (year in years) {
+  input_file <- paste0("data_", year, "_los40.csv")
+  input_path <- file.path(input_dir, input_file)
+  
+  if (file.exists(input_path)) {
+    df <- read_csv(input_path, show_col_types = FALSE)
+    transformed_df <- transform_df(df)
+    
+    output_file <- paste0("data_", year, "_los40_el_edge_list.csv")
+    output_path <- file.path(output_dir, output_file)
+    
+    write_csv(transformed_df, output_path)
+    
+    print(paste("Archivo guardado:", output_path))
+  } else {
+    print(paste("Archivo no encontrado:", input_path))
+  }
+}
+
+```
+
+-   Times_Colab
+
+The second step is making the edge_list for artists. The code reads each CSV file from the directory and generates an edge list for each pair of collaborators in the songs, calculating two metrics: `Times_on_top`, the sum one, which is the sum of the times their collaborations reached the top, and `Times_Colab`, which counts how many times they have collaborated together. It then saves these results in separate CSV files in the `final_edge_lists_artists` file.
+
+```{r}
+input_directory <- "los40_df/Times_on_top"
+output_directory <- "los40_df/artist_and_genre_edge_lists/final_edge_lists_artists"
+
+
+if (!dir.exists(output_directory)) {
+  dir.create(output_directory, recursive = TRUE)
+}
+
+
+file_list <- list.files(path = input_directory, pattern = "*.csv", full.names = TRUE)
+
+# Function:
+
+generate_edge_list <- function(file_path) {
+  
+  df <- read.csv(file_path)
+  
+  
+  collaborator_cols <- grep("collaborator", names(df), value = TRUE)
+  
+  
+  edge_list <- df |>
+    rowwise() |>
+    mutate(combo = list(combn(na.omit(c_across(all_of(collaborator_cols))), 2, simplify = FALSE))) |>
+    unnest(combo) |>
+    mutate(Collaborator1 = sapply(combo, `[`, 1),
+           Collaborator2 = sapply(combo, `[`, 2)) |>
+    select(Collaborator1, Collaborator2, times_on_top) |>
+    group_by(Collaborator1, Collaborator2) |>
+    summarise(Times_on_top = sum(times_on_top, na.rm = TRUE),
+              Times_Colab = n()) |>
+    ungroup()
+  
+  return(edge_list)
+}
+
+
+
+for (file_path in file_list) {
+  edge_list_df <- generate_edge_list(file_path)
+  
+
+  base_name <- basename(file_path)
+  base_name <- sub(".csv", "_edge_list.csv", base_name)
+  
+
+  output_path <- file.path(output_directory, base_name)
+  
+
+  write.csv(edge_list_df, output_path, row.names = FALSE)
+  
+  print(paste("La lista de aristas ha sido generada para", base_name, "y guardada en", output_directory))
+}
+
+```
+
+## 3.2. GENRE EDGE LISTS
+
+For this section, the dataset `artistas_totales` will be used, which includes the artist's name, ID, Spotify genre, and mapped genre. To understand how this data is extracted, please refer to the `Code_Explanation_API_Spotify` file.
+
+### 3.2.1. PRE- EDGE LISTS
+
+In order to obtain the edge list for genres, we take the previously created edge lists of artists and add the genre information for each artist in new columns. To do this, we link each artist to the \`artistas_totales\` dataset, where all genres are listed. In this process, we created a function that searches for the genre of each collaborator in the \`mapped_genre\` column of the \`artistas_totales\` dataset. If a mapped genre is available, it is selected; otherwise, the global genre of the artist found in the \`genres\` column is used. This allows us to enrich the edge lists with accurate genre information associated with each artist in the collaborations.
+
+```{r}
+
+input_directory <- "los40_df/artist_and_genre_edge_lists/final_edge_lists_artists"
+output_directory <- "los40_df/artist_and_genre_edge_lists/pre_edge_lists"
+
+
+files <- list.files(input_directory, pattern = "*.csv", full.names = TRUE)
+
+
+
+get_genre <- function(colaborador, artistas_totales) {
+  row <- artistas_totales |>
+    filter(Artista == colaborador) |>
+    select(mapped_genre, genres) |>
+    slice(1) 
+  
+  if (nrow(row) == 0) {
+    return(NA) 
+  } else if (!is.na(row$mapped_genre) && row$mapped_genre != "") {
+    return(row$mapped_genre)
+  } else {
+    return(row$genres)
+  }
+}
+
+
+for (file in files) {
+
+  df <- read_csv(file, show_col_types = FALSE)
+  
+
+  df <- df |>
+    mutate(
+      genre1 = sapply(Collaborator1, get_genre, artistas_totales = artistas_totales),
+      genre2 = sapply(Collaborator2, get_genre, artistas_totales = artistas_totales)
+    )
+  
+
+  output_file <- file.path(output_directory, basename(file))
+  
+ 
+  write_csv(df, output_file)
+}
+
+```
+
+### 3.2.2. GENRE EDGE LISTS
+
+We process the CSV files from the `pre_edge_lists` folder by separating the genres of the artists into lists and generating all possible combinations between these genres. We then count the frequency of each unique combination and sort the combinations by their frequency. Finally, we save the processed results in the `final_edge_lists_genres` folder, creating a new file for each original CSV that contains the enriched information with genre combinations and their frequencies.
+
+```{r}
+
+process_file <- function(input_path, output_dir) {
+  
+  
+  data <- read_csv(input_path, show_col_types = FALSE)
+  
+ 
+  df_split <- data |>
+    mutate(
+      genre1_list = strsplit(as.character(genre1), ",\\s*"),
+      genre2_list = strsplit(as.character(genre2), ",\\s*")
+    )
+  
+
+  df_expanded <- df_split |>
+    rowwise() |>
+    do({
+      expand.grid(
+        genre1 = unlist(.[["genre1_list"]]),
+        genre2 = unlist(.[["genre2_list"]]),
+        stringsAsFactors = FALSE
+      )
+    }) |>
+    ungroup()
+  
+
+  df_edge_list <- df_expanded |>
+    count(genre1, genre2, name = "count") |>
+    arrange(desc(count)) 
+  
+
+  output_file <- paste0("processed_", basename(input_path))
+  output_path <- file.path(output_dir, output_file)
+  
+  write_csv(df_edge_list, output_path)
+  
+  print(paste("Archivo guardado:", output_path))
+}
+
+
+input_dir <- "los40_df/artist_and_genre_edge_lists/pre_edge_lists"
+output_dir <- "los40_df/artist_and_genre_edge_lists/final_edge_lists_genres"
+
+
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+
+file_list <- list.files(input_dir, pattern = "\\.csv$", full.names = TRUE)
+
+
+for (input_path in file_list) {
+  process_file(input_path, output_dir)
+}
+
+
+print("Todos los archivos han sido procesados y guardados.")
+
+```
+
+# 4. NETWORK ANALYSIS
+
+## 4.0. DESCRIPTIVE ANALYSIS
+
+For extracting all the data necessary for making a descriptive analysisis, we will need the `raw_data_los40` file attached. The objective is to extract the number of proportion songs in the top 40 in Spain that are collaborations per year. For doing this, we will first calculate the total number of songs (no duplicated) in the top lists.
+
+```{r}
+
+raw_data_los40 <- read.csv ("raw_data_los40.csv")
+
+```
+
+For doing this, we will first calculate the total number of songs (no duplicated) in the top lists. This code converts the `date` column in `raw_data_los40` to the `Date` format, then extracts the year from each date and stores it in a new `year` column. It then calculates the total number of unique songs (`songTitle`) for each year. This is done by first ensuring each song is unique, then grouping the data by `year`, and finally summarizing it to count the total number of unique songs for each year, which is stored in `total_unique_songs_by_year`.
+
+```{r}
+
+raw_data_los40$date <- as.Date(raw_data_los40$date, format = "%Y-%m-%d")
+
+
+raw_data_los40$year <- format(raw_data_los40$date, "%Y")
+
+
+total_unique_songs_by_year <- raw_data_los40 |>
+  distinct(songTitle, .keep_all = TRUE) |> 
+  group_by(year) |>
+  summarise(total_songs = n())
+
+
+```
+
+The next step is calculating the number of unique collaborations (songs) for each year using CSV files in the `los40_df` directory. It first lists all files in the directory that match the pattern "data_YYYY_los40.csv". For each file, it extracts the year from the file name and reads the CSV into a data frame. Then, it identifies the unique collaborations by selecting distinct songs and counts them.
+
+```{r}
+base_path <- "los40_df"
+
+
+file_list <- list.files(base_path, pattern = "data_\\d{4}_los40\\.csv$", full.names = TRUE)
+
+
+collabs_by_year <- data.frame(year = integer(), collabs = integer())
+
+
+for (file_path in file_list) {
+
+  year <- as.numeric(gsub(".*data_(\\d{4})_los40\\.csv$", "\\1", file_path))
+  
+
+  df <- read.csv(file_path)
+  
+
+  unique_collabs <- df |>
+    distinct(song)
+  
+
+  num_collabs <- nrow(unique_collabs)
+  
+
+  collabs_by_year <- rbind(collabs_by_year, data.frame(year = year, collabs = num_collabs))
+}
+
+```
+
+Finally, we merge the two dataframes by the "year" column. Then we calculate the proportion of collaborations by dividing the number of collaborations (`collabs`) by the total number of unique songs (`total_songs`) for each year.
+
+```{r}
+proportion_df <- merge(total_unique_songs_by_year, collabs_by_year, by = "year")
+
+proportion_df <- proportion_df |>
+  mutate(collab_proportion = collabs / total_songs)
+
+```
+
+Now, we visualize it:
+
+```{r}
+
+grafico <- ggplot(proportion_df, aes(x = as.numeric(year), y = collab_proportion)) +
+  geom_line(color = "#2E4053", size = 1.5) +  
+  geom_point(color = "#C0392B", size = 3) +   
+  geom_smooth(method = "loess", se = FALSE, color = "#16A085", linetype = "dashed", size = 1) +
+  labs(title = "Evolution of the proportion of collaborations per year (2006-2024)",
+       x = "Year",
+       y = "Proportion of Unique Collaborations") +
+  theme_minimal(base_size = 14) +  
+  theme(
+    plot.title = element_text(face = "bold", size = 20, hjust = 0.5), 
+    plot.subtitle = element_text(size = 16, hjust = 0.5),  
+    axis.title.x = element_text(margin = margin(t = 20), size = 16),  
+    axis.title.y = element_text(margin = margin(r = 20), size = 16),  
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14),  
+    axis.text.y = element_text(size = 14),  
+    panel.grid.major = element_line(color = "gray85", size = 0.5),  
+    panel.grid.minor = element_blank()  
+  )
+
+
+print (grafico)
+```
+
+## 4.1. GRAPHS
+
+The next phase involves creating graphs based on the edge lists for both artist and genre collaborations. These graphs will represent the relationships between artists and genres, capturing the structure of their interactions
+
+-   Artists:
+
+```{r}
+base_path <- "los40_df/artist_and_genre_edge_lists/final_edge_lists_artists"
+
+graphs_artist_list <- list()
+
+file_list <- list.files(base_path, pattern = "\\.csv$", full.names = TRUE)
+
+for (file_path in file_list) {
+  
+  edge_list <- read_csv(file_path, show_col_types = FALSE)
+  
+  g <- graph_from_data_frame(edge_list, directed = FALSE)
+  
+  graph_name <- tools::file_path_sans_ext(basename(file_path))
+  graphs_artist_list[[graph_name]] <- g
+}
+```
+
+-   Genres
+
+```{r}
+base_path <- "los40_df/artist_and_genre_edge_lists/final_edge_lists_genres"
+
+
+graphs_genre_list <- list()
+
+
+file_list <- list.files(base_path, pattern = "\\.csv$", full.names = TRUE)
+
+
+for (file_path in file_list) {
+  
+
+  edge_list <- read_csv(file_path, show_col_types = FALSE)
+  
+ 
+  g <- graph_from_data_frame(edge_list, directed = FALSE)
+  
+
+  graph_name <- tools::file_path_sans_ext(basename(file_path))
+  graphs_genre_list[[graph_name]] <- g }
+
+```
+
+## 4.2. BASIC METRICS
+
+To facilitate the analysis, we will use a function, `calculate_metrics`, designed to compute several key network metrics. This function will be applied to each graph to extract important characteristics:
+
+1.  **Number of Nodes and Edges**: Measures the size and connectivity of the network.
+
+2.  **Connected Components**: Assesses network cohesion by identifying isolated subgroups.
+
+3.  **Largest and Second-Largest Connected Components**: Evaluates the network's structure in terms of its most significant subgroups.
+
+4.  **Relative Size of the Largest Component**: Indicates how well-connected the network's primary component is.
+
+5.  **Degree Centrality**: Calculates the average importance of nodes based on their connections.
+
+6.  **Assortativity**: Measures the tendency of nodes to connect with similar nodes.
+
+7.  **Gini Index**: Assesses the inequality in the distribution of connections among nodes.
+
+```{r}
+
+graphs_list <- c(graphs_artist_list, graphs_genre_list)
+```
+
+```{r}
+
+calculate_metrics <- function(g, graph_name) {
+  num_nodes <- vcount(g)
+  num_edges <- ecount(g)
+  components <- components(g)
+  num_connected_components <- components$no
+  largest_component_size <- max(components$csize)
+  second_largest_component_size <- ifelse(length(components$csize) > 1, sort(components$csize, decreasing = TRUE)[2], 0)
+  relative_size_largest_component <- largest_component_size / num_nodes
+  degree_centrality <- mean(degree(g, normalized = TRUE))
+  assortativity_value <- assortativity_degree(g)
+  gini_index <- ineq::Gini(degree(g))
+  
+  # year extraction
+  year <- str_extract(graph_name, "2\\d+")
+  
+  return(data.frame(
+    graph_name = graph_name,
+    year = year,
+    num_nodes = num_nodes,
+    num_edges = num_edges,
+    num_connected_components = num_connected_components,
+    largest_component_size = largest_component_size,
+    second_largest_component_size = second_largest_component_size,
+    relative_size_largest_component = relative_size_largest_component,
+    degree_centrality = degree_centrality,
+    assortativity_value = assortativity_value,
+    gini_index = gini_index
+  ))
+}
+
+
+artist_metrics_list <- lapply(names(graphs_artist_list), function(name) {
+  calculate_metrics(graphs_artist_list[[name]], name)
+})
+df_artist_metrics <- bind_rows(artist_metrics_list)
+
+
+genre_metrics_list <- lapply(names(graphs_genre_list), function(name) {
+  calculate_metrics(graphs_genre_list[[name]], name)
+})
+df_genre_metrics <- bind_rows(genre_metrics_list)
+
+
+
+```
+
+Once we have all the metrics, we can start visualizing the most important ones on the next steps.
+
+### 4.2.1. NUMBER OF NODES AND EDGES
+
+-   Artists
+
+```{r}
+
+artist_plot <- ggplot(df_artist_metrics, aes(x = as.numeric(year))) +
+  geom_line(aes(y = num_nodes, color = "Number of Nodes"), size = 1.5) + 
+  geom_point(aes(y = num_nodes, color = "Number of Nodes"), size = 3) +   
+  geom_line(aes(y = num_edges, color = "Number of Edges"), size = 1.5) + 
+  geom_point(aes(y = num_edges, color = "Number of Edges"), size = 3) +   
+  labs(title = "Evolution of Nodes and Edges in the Artist Network",
+       x = "Year",
+       y = "Count") +
+  scale_color_manual(values = c("Number of Nodes" = "#2E4053", "Number of Edges" = "#1F618D")) + 
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 20, hjust = 0.5),
+    axis.title.x = element_text(margin = margin(t = 20), size = 16),
+    axis.title.y = element_text(margin = margin(r = 20), size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+    axis.text.y = element_text(size = 14),
+    panel.grid.major = element_line(color = "gray85", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.position = "top",
+    legend.title = element_blank()
+  )
+
+print(artist_plot)
+
+```
+
+-   Genres
+
+```{r}
+
+genre_plot <- ggplot(df_genre_metrics, aes(x = as.numeric(year))) +
+  geom_line(aes(y = num_nodes, color = "Number of Nodes"), size = 1.5) + 
+  geom_point(aes(y = num_nodes, color = "Number of Nodes"), size = 3) +   
+  geom_line(aes(y = num_edges, color = "Number of Edges"), size = 1.5) + 
+  geom_point(aes(y = num_edges, color = "Number of Edges"), size = 3) +  
+  labs(title = "Evolution of Nodes and Edges in the Genre Network",
+       x = "Year",
+       y = "Count") +
+  scale_color_manual(values = c("Number of Nodes" = "#D35400", "Number of Edges" = "#E67E22")) + 
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 20, hjust = 0.5),
+    axis.title.x = element_text(margin = margin(t = 20), size = 16),
+    axis.title.y = element_text(margin = margin(r = 20), size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+    axis.text.y = element_text(size = 14),
+    panel.grid.major = element_line(color = "gray85", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.position = "top",
+    legend.title = element_blank()
+  )
+
+
+print(genre_plot)
+
+```
+
+### 4.2.3. RELATIVE SIZE OF THE LARGEST COMPONENT
+
+```{r}
+
+df_combined <- bind_rows(
+  df_artist_metrics |> mutate(Type = "Artist"),
+  df_genre_metrics |> mutate(Type = "Genre")
+)
+
+```
+
+```{r}
+
+
+combined_plot <- ggplot(df_combined, aes(x = as.numeric(year), 
+                                         y = relative_size_largest_component, 
+                                         color = Type)) +
+  geom_line(size = 1.5) +  
+  geom_point(size = 3) +  
+  labs(title = "Evolution of the Relative Size of the Largest Component",
+       x = "Year",
+       y = "Relative Size of the Largest Component") +
+  scale_color_manual(values = c("Artist" = "#2E4053", "Genre" = "#D35400")) + 
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 20, hjust = 0.5),
+    axis.title.x = element_text(margin = margin(t = 20), size = 16),
+    axis.title.y = element_text(margin = margin(r = 20), size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+    axis.text.y = element_text(size = 14),
+    panel.grid.major = element_line(color = "gray85", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.position = "top",
+    legend.title = element_blank()
+  )
+
+
+print(combined_plot)
+
+
+```
+
+### 4.2.4. ASSORTATIVITY
+
+```{r}
+
+combined_plot <- ggplot(df_combined, aes(x = as.numeric(year), 
+                                         y = assortativity_value, 
+                                         color = Type)) +
+  geom_line(size = 1.5) +  
+  geom_point(size = 3) +  
+  labs(title = "Evolution of Assortativity in Artist and Genre Networks",
+       x = "Year",
+       y = "Assortativity") +
+  scale_color_manual(values = c("Artist" = "#2E4053", "Genre" = "#D35400")) +  
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 20, hjust = 0.5),
+    axis.title.x = element_text(margin = margin(t = 20), size = 16),
+    axis.title.y = element_text(margin = margin(r = 20), size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+    axis.text.y = element_text(size = 14),
+    panel.grid.major = element_line(color = "gray85", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.position = "top",
+    legend.title = element_blank()
+  )
+
+
+print(combined_plot)
+
+
+```
+
+### 4.2.5 JACCARD SIMILARITY WEIGHTED
+
+In order to calculate the Jaccard Similarity Weighted we have to combine the different weigths of our graphs (Times_on_top and Times_Colab for the artists one; and "count" for the genres), for each pair of graphs. This will result into a combined weight from which the matrix will be made. Once we have done this for both of the graphs lists, we save them as dataframes.
+
+-   Artists
+
+```{r}
+
+jaccard_weighted_artists <- function(g1, g2) {
+  if (!"Times_on_top" %in% edge_attr_names(g1) || !"Times_Colab" %in% edge_attr_names(g1)) {
+    return(NA)
+  }
+  
+  if (!"Times_on_top" %in% edge_attr_names(g2) || !"Times_Colab" %in% edge_attr_names(g2)) {
+    return(NA)
+  }
+  
+  E(g1)$combined_weight <- rowMeans(cbind(E(g1)$Times_on_top, E(g1)$Times_Colab), na.rm = TRUE)
+  E(g2)$combined_weight <- rowMeans(cbind(E(g2)$Times_on_top, E(g2)$Times_Colab), na.rm = TRUE)
+
+  adj1 <- as_adjacency_matrix(g1, attr = "combined_weight", sparse = FALSE)
+  adj2 <- as_adjacency_matrix(g2, attr = "combined_weight", sparse = FALSE)
+
+  all_nodes <- union(V(g1)$name, V(g2)$name)
+  adj1_full <- matrix(0, nrow = length(all_nodes), ncol = length(all_nodes))
+  adj2_full <- matrix(0, nrow = length(all_nodes), ncol = length(all_nodes))
+
+  rownames(adj1_full) <- colnames(adj1_full) <- all_nodes
+  rownames(adj2_full) <- colnames(adj2_full) <- all_nodes
+
+  adj1_full[rownames(adj1), colnames(adj1)] <- adj1
+  adj2_full[rownames(adj2), colnames(adj2)] <- adj2
+
+  row_sums1 <- rowSums(adj1_full, na.rm = TRUE)
+  row_sums2 <- rowSums(adj2_full, na.rm = TRUE)
+
+  adj1_norm <- sweep(adj1_full, 1, row_sums1, FUN = "/")
+  adj2_norm <- sweep(adj2_full, 1, row_sums2, FUN = "/")
+
+  intersection <- adj1_norm * adj2_norm
+  union <- (adj1_norm + adj2_norm) / 2
+
+  similarity <- sum(intersection, na.rm = TRUE) / sum(union, na.rm = TRUE)
+
+  return(similarity)
+}
+
+num_graphs <- length(graphs_artist_list)
+jaccard_weighted_matrix_artists <- matrix(NA, nrow = num_graphs, ncol = num_graphs)
+
+graph_names <- names(graphs_artist_list)
+rownames(jaccard_weighted_matrix_artists) <- graph_names
+colnames(jaccard_weighted_matrix_artists) <- graph_names
+
+for (i in 1:num_graphs) {
+  for (j in 1:num_graphs) {
+    g1 <- graphs_artist_list[[i]]
+    g2 <- graphs_artist_list[[j]]
+
+    jaccard_weighted_similarity <- jaccard_weighted_artists(g1, g2)
+
+    jaccard_weighted_matrix_artists[i, j] <- jaccard_weighted_similarity
+  }
+}
+
+jaccard_weighted_matrix_artists[is.na(jaccard_weighted_matrix_artists)] <- 0
+
+jaccard_weighted_matrix_artists <- as.data.frame(jaccard_weighted_matrix_artists)
+
+jaccard_weighted_matrix_artists$grafo <- rownames(jaccard_weighted_matrix_artists)
+
+jaccard_weighted_matrix_artists <- jaccard_weighted_matrix_artists[, c("grafo", setdiff(names(jaccard_weighted_matrix_artists), "grafo"))]
+
+
+```
+
+-   Genres
+
+```{r}
+
+jaccard_weighted_genres <- function(g1, g2) {
+  if (!"count" %in% edge_attr_names(g1)) {
+    return(NA)
+  }
+  
+  if (!"count" %in% edge_attr_names(g2)) {
+    return(NA)
+  }
+  
+  adj1 <- as_adjacency_matrix(g1, attr = "count", sparse = FALSE)
+  adj2 <- as_adjacency_matrix(g2, attr = "count", sparse = FALSE)
+
+  all_nodes <- union(V(g1)$name, V(g2)$name)
+  adj1_full <- matrix(0, nrow = length(all_nodes), ncol = length(all_nodes))
+  adj2_full <- matrix(0, nrow = length(all_nodes), ncol = length(all_nodes))
+
+  rownames(adj1_full) <- colnames(adj1_full) <- all_nodes
+  rownames(adj2_full) <- colnames(adj2_full) <- all_nodes
+
+  adj1_full[rownames(adj1), colnames(adj1)] <- adj1
+  adj2_full[rownames(adj2), colnames(adj2)] <- adj2
+
+  row_sums1 <- rowSums(adj1_full, na.rm = TRUE)
+  row_sums2 <- rowSums(adj2_full, na.rm = TRUE)
+
+  adj1_norm <- sweep(adj1_full, 1, row_sums1, FUN = "/")
+  adj2_norm <- sweep(adj2_full, 1, row_sums2, FUN = "/")
+
+  intersection <- adj1_norm * adj2_norm
+  union <- (adj1_norm + adj2_norm) / 2
+
+  similarity <- sum(intersection, na.rm = TRUE) / sum(union, na.rm = TRUE)
+
+  return(similarity)
+}
+
+num_graphs <- length(graphs_genre_list)
+jaccard_weighted_matrix_genres <- matrix(NA, nrow = num_graphs, ncol = num_graphs)
+
+graph_names <- names(graphs_genre_list)
+rownames(jaccard_weighted_matrix_genres) <- graph_names
+colnames(jaccard_weighted_matrix_genres) <- graph_names
+
+for (i in 1:num_graphs) {
+  for (j in 1:num_graphs) {
+    g1 <- graphs_genre_list[[i]]
+    g2 <- graphs_genre_list[[j]]
+
+    jaccard_weighted_similarity <- jaccard_weighted_genres(g1, g2)
+
+    jaccard_weighted_matrix_genres[i, j] <- jaccard_weighted_similarity
+  }
+}
+
+jaccard_weighted_matrix_genres[is.na(jaccard_weighted_matrix_genres)] <- 0
+
+jaccard_weighted_matrix_genres <- as.data.frame(jaccard_weighted_matrix_genres)
+
+jaccard_weighted_matrix_genres$grafo <- rownames(jaccard_weighted_matrix_genres)
+
+jaccard_weighted_matrix_genres <- jaccard_weighted_matrix_genres[, c("grafo", setdiff(names(jaccard_weighted_matrix_genres), "grafo"))]
+
+```
+
+In order to have the right name for each graph, according to the year, we create a function for extracting the first 4 numbers that start with a "2", and we apply it.
+
+```{r}
+
+simplify_name <- function(name) {
+  match <- regmatches(name, regexpr("2\\d{3}", name))
+  return(match)
+}
+
+
+jaccard_weighted_matrix_artists$grafo <- sapply(jaccard_weighted_matrix_artists$grafo, simplify_name)
+colnames(jaccard_weighted_matrix_artists)[-1] <- sapply(colnames(jaccard_weighted_matrix_artists)[-1], simplify_name)
+
+
+jaccard_weighted_matrix_genres$grafo <- sapply(jaccard_weighted_matrix_genres$grafo, simplify_name)
+colnames(jaccard_weighted_matrix_genres)[-1] <- sapply(colnames(jaccard_weighted_matrix_genres)[-1], simplify_name)
+
+
+```
+
+We also extract the graph names from the `grafo` column and assign them as labels for the rows and columns of the correlation matrices for both artists and genres. The weighted Jaccard similarity dataframes are then converted into correlation matrices. Finally, we set the diagonal values of these matrices to `NA` to prevent self-comparisons from appearing in the visualization, allowing for a clearer analysis of similarities between different years.
+
+```{r}
+row_labels_artists <- jaccard_weighted_matrix_artists$grafo
+
+
+cor_matrix_artists <- as.matrix(jaccard_weighted_matrix_artists[, -1])
+
+
+rownames(cor_matrix_artists) <- row_labels_artists
+colnames(cor_matrix_artists) <- row_labels_artists
+
+diag(cor_matrix_artists) <- NA
+
+
+row_labels_genres <- jaccard_weighted_matrix_genres$grafo
+cor_matrix_genres <- as.matrix(jaccard_weighted_matrix_genres[, -1])
+rownames(cor_matrix_genres) <- row_labels_genres
+colnames(cor_matrix_genres) <- row_labels_genres
+diag(cor_matrix_genres) <- NA
+
+
+```
+
+-   Corrplot Artists
+
+```{r}
+diag(cor_matrix_artists) <- NA
+
+
+
+corrplot(cor_matrix_artists, method = "color", type = "lower", na.label = " ", diag = FALSE,
+         col = colorRampPalette(c("white", "#1ABC9C", "#8E44AD"))(50), 
+         tl.col = "black", tl.srt = 45, 
+         cl.lim = c(0, 1), 
+         title = "Weighted Jaccard Similarities - Artists",
+         mar = c(0, 0, 2, 0))
+
+
+
+```
+
+-   Corrplot Genres
+
+```{r}
+
+diag(cor_matrix_genres) <- NA
+
+
+corrplot(cor_matrix_genres, method = "color", type = "lower", na.label = " ", diag = FALSE,
+         col = colorRampPalette(c("white", "#F1C40F", "#E74C3C"))(50),
+         tl.col = "black", tl.srt = 45, 
+         cl.lim = c(0, 1),
+         title = "Weighted Jaccard Similarities - Genres",
+         mar = c(0, 0, 2, 0))
+
+
+```
+
+### 4.2.6 GINI INDEX
+
+```{r}
+grafico_comparativo_gini <- ggplot(df_combined, aes(x = as.numeric(year), y = gini_index, color = Type)) +
+  geom_line(size = 1.5) +
+  geom_point(size = 3) +
+  geom_smooth(method = "loess", se = FALSE, linetype = "dashed", size = 1) +
+  scale_color_manual(values = c("Artist" = "#2E4053", "Genre" = "#D35400")) +
+  labs(title = "Comparison of Gini Index Evolution in Artist and Genre Networks",
+       subtitle = "Analysis of collaboration heterogeneity over time for both networks",
+       x = "Year",
+       y = "Gini Index") +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    axis.title.x = element_text(margin = margin(t = 10), size = 12),
+    axis.title.y = element_text(margin = margin(r = 10), size = 12),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    panel.grid.major = element_line(color = "gray85", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.position = "top",
+    legend.title = element_blank()
+  )
+
+print(grafico_comparativo_gini)
+
+
+```
+
+### 4.2.7. **EVOLUTION OF GENRE RELEVANCE AND MIXING**
+
+To identify the main genres that dominate collaborations in the charts, several key steps are required.
+
+First, we create a list to store the weighted degrees of each node, considering the weight associated with each one. After generating this list and creating the corresponding dataframe, we make additional adjustments, such as adding a column to indicate the year, and organize the data into a structured list. Next, we combine all the dataframes into a single one and calculate the total weighted degree for each node across all years. The ultimate goal is to determine the top 15 most influential and successful genres in the music collaboration scene, revealing the predominant trends in the charts.
+
+```{r}
+
+degree_list <- list()
+
+for (graph_name in names(graphs_genre_list)) {
+  g <- graphs_genre_list[[graph_name]]
+  
+  weighted_degrees <- strength(g, mode = "all", weights = E(g)$count)
+  
+  degree_df <- data.frame(Node = names(weighted_degrees), Degree = weighted_degrees)
+  
+  degree_df$Year <- graph_name
+  
+  degree_list[[graph_name]] <- degree_df
+}
+
+combined_degree_df <- bind_rows(degree_list)
+
+total_degrees <- combined_degree_df |>
+  group_by(Node) |>
+  summarise(Total_Degree = sum(Degree)) |>
+  arrange(desc(Total_Degree))
+
+top_15_nodes <- head(total_degrees, 15)
+```
+
+Once the most important genres have been identified, we create an empty dataframe to store the results. Next, we calculate the normalized weighted degree of each node in the graph for each of these genres. This allows us to measure the actual proportion of these genres relative to the total for each year, providing a more accurate view of their annual influence.
+
+```{r}
+top_15_genres <- top_15_nodes$Node
+
+results_df <- data.frame(Year = character(),
+                         Genre = character(),
+                         Weighted_Degree = numeric(),
+                         Normalized_Weighted_Degree = numeric(),
+                         stringsAsFactors = FALSE)
+
+for (graph_name in names(graphs_genre_list)) {
+  g <- graphs_genre_list[[graph_name]]
+  
+  weighted_degrees <- strength(g, mode = "all", weights = E(g)$count)
+  
+  total_weighted_degree <- sum(weighted_degrees)
+  
+  for (genre in top_15_genres) {
+    degree_value <- ifelse(genre %in% names(weighted_degrees), weighted_degrees[genre], 0)
+    
+    normalized_degree_value <- ifelse(total_weighted_degree > 0, degree_value / total_weighted_degree, 0)
+    
+    results_df <- rbind(results_df, data.frame(Year = graph_name,
+                                               Genre = genre,
+                                               Weighted_Degree = degree_value,
+                                               Normalized_Weighted_Degree = normalized_degree_value,
+                                               stringsAsFactors = FALSE))
+  }
+}
+
+results_df$Year <- str_extract(results_df$Year, "\\d{4}")
+
+
+
+
+```
+
+For making the plot, we will simplify the genres that can be derivations of bigger ones, such as: dance pop or pop rap, into pop. Then we will visualize it:
+
+```{r}
+
+filtered_df <- results_df |>
+  filter(Genre != "other")
+
+grouped_df <- filtered_df |>
+  mutate(Genre = case_when(
+    Genre %in% c("pop", "dance pop", "pop rap") ~ "Pop",
+    Genre %in% c("electro", "electro house", "house") ~ "Electro-House",
+    TRUE ~ Genre
+  )) |>
+  group_by(Year, Genre) |>
+  summarise(Normalized_Weighted_Degree = sum(Normalized_Weighted_Degree)) |>
+  ungroup()
+
+grouped_df <- grouped_df |>
+  mutate(Genre = str_to_title(Genre))
+
+colors <- c("Dance" = "#66c2a5", "Electro-House" = "#fc8d62", "Hip Hop" = "#8da0cb", 
+            "Pop" = "#e78ac3", "R&B" = "#a6d854", "Rap" = "#ffd92f", 
+            "Reggaeton" = "#e5c494", "Rock" = "#b3b3b3", "Trap" = "#fb8072", 
+            "Urban Contemporary" = "#80b1d3")
+
+grafico_generos <- ggplot(grouped_df, aes(x = Year, y = Normalized_Weighted_Degree, color = Genre, group = Genre)) +
+  geom_line(size = 1.2) + 
+  scale_color_manual(values = colors) +
+  labs(title = "Evolution of Normalized Weighted Degree for Genres Over Time",
+       subtitle = "Analysis of genre collaboration relevance from year to year",
+       x = "Year",
+       y = "Normalized Weighted Degree") +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 20, hjust = 0.5),
+    plot.subtitle = element_text(size = 16, hjust = 0.5),
+    axis.title.x = element_text(margin = margin(t = 12), size = 16),
+    axis.title.y = element_text(margin = margin(r = 12), size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+    axis.text.y = element_text(size = 14),
+    panel.grid.major = element_line(color = "gray90", size = 0.5),
+    panel.grid.minor = element_blank(),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    legend.position = "bottom",
+    legend.box = "horizontal"
+  )
+
+print(grafico_generos)
+
+
+```
+
+Lastly, to explore the relationship between genres over time, we will create heatmap that will allow us to visualize the extent to which these genres are interconnected, in this case we will also use the Normalized Weighted Degree.
+
+```{r}
+
+pivot_df <- grouped_df |>
+  pivot_wider(names_from = Genre, values_from = Normalized_Weighted_Degree, values_fill = list(Normalized_Weighted_Degree = 0))
+
+
+pivot_df <- pivot_df |>
+  select(-Year)
+
+
+cor_matrix <- cor(pivot_df, use = "complete.obs", method = "pearson")
+
+
+cor_df <- as.data.frame(as.table(cor_matrix))
+
+
+heatmap_plot <- ggplot(cor_df, aes(Var1, Var2, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "#FFF5E1", mid = "#FDB863", high = "#B25D00", space = "Lab", 
+                       midpoint = 0, limit = c(-1, 1), name = "Correlation") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12, color = "#4A4A4A"),
+        axis.text.y = element_text(size = 12, color = "#4A4A4A"),
+        panel.grid.major = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "bottom",
+        legend.direction = "horizontal",
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold", color = "#4A4A4A")) +
+  labs(x = "", y = "", title = "Heatmap of Genre Correlations") +
+  coord_fixed()
+
+print(heatmap_plot)
+
+
+```

@@ -1,0 +1,200 @@
+---
+title: "Web Scrapping - Los 40"
+author: "Mireia Belda Cortés"
+date: "2024-08-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. INTRODUCTION
+
+In the following script, you will find how to perform web scraping through the Los 40 API to extract all the necessary data for the research, and cleaning this data for the research objectives.
+
+The first step to carry out this process is to load all the necessary libraries:
+
+```{r}
+
+library(tidyverse)
+library(httr2)
+library(httr)
+library(ggplot2)
+library(jsonlite)
+library(xml2)
+library(stringr)
+library(stringdist)
+library(stargazer)
+library(plotly)
+library(dotenv)
+library(fmsb)
+library(data.table)
+library(igraph)
+library(tidyr)
+library(viridis)
+library(reshape2)
+library(RColorBrewer)
+library(sf)
+library(rnaturalearth)
+library(scrapex)
+library(tm)
+library(tibble)
+library(rvest)
+
+
+detach("package:rjson", unload = TRUE) # avoiding confussions
+
+
+
+```
+
+# 2. WEB SCRAPPING
+
+**Los 40 Principales** publishes a weekly list of the 40 most popular songs in Spain. This list is available on their website, including historical records from the past decades. Additionally, they offer an **API that allows programmatic access to this data.**
+
+This research focuses on the period between **January 7, 2006, and July 1, 2024**, which marks the end of the data collection. The following code generates a list of dates corresponding to every Saturday within this range, as that is the day of the week when these charts are updated. Then, it creates a sequence of weekly spaced dates covering the entire period of interest.
+
+If you want to extract data from a different date range, you only need to adjust the `start_date` and `end_date` values. For instance, you would set `start_date` to your desired start date and `end_date` to your desired end date.
+
+If you want to automatically retrieve all data up to the current date, you simply need to set `end_date` to `Sys.Date()`. This function will dynamically provide the current date each time the script is run, ensuring that the end date always reflects today's date.
+
+With these dates, the code constructs the necessary URLs to request data from the API. These URLs are generated using a template where the date, the number of items to extract (40), and other required parameters are specified. For each generated URL, a specific request is made to the API to retrieve the top hits list for that week.
+
+Once we have them the code makes the requests and retrieves the data, which is then converted to text. Subsequently, this data is structured into a data frame. Finally, all the collected data is combined and saved into a CSV file, making it easier for subsequent analysis.
+
+```{r}
+
+
+start_date <- as.Date("2006-01-07")  
+end_date <-  as.Date("2024-06-01") 
+saturday_dates <- seq.Date(from = start_date, to = end_date, by = "week")
+
+# Paso 2: Construir las URLs
+urls <- sapply(saturday_dates, function(date) {
+  date_str <- format(date, "%Y-%m-%d")
+  url <- sprintf('https://los40.com/pf/api/v3/content/fetch/lista40-api?query={"date":"%s","itemsPerPage":40,"order":"asc","orderBy":"position","productId":"2"}', date_str)
+  return(url)
+})
+
+
+fetch_data <- function(url) {
+  response <- GET(url)
+  if (status_code(response) == 200) {
+    content <- rawToChar(response$content)
+    json_data <- fromJSON(content, flatten = TRUE)
+    return(json_data)
+  } else {
+    return(NULL)
+  }
+}
+
+all_data <- list()
+
+for (i in seq_along(urls)) {
+  data <- fetch_data(urls[i])
+  if (!is.null(data)) {
+    all_data[[i]] <- data
+  }
+}
+
+
+combined_data <- do.call(rbind, all_data) 
+
+write.csv(combined_data, "raw_data_los40.csv", row.names = FALSE)
+
+```
+
+Now, we have all the data we need for our research! We have to clean it.
+
+# 3. CLEANING
+
+```{r}
+
+combined_data <- raw_data_los40
+```
+
+Now, we have all the data we need for our research! We have to clean it.
+
+```{r}
+
+data <- combined_data%>%
+  select(id, date, position, songTitle, artistName) %>%
+  mutate(year = year(date)) %>%
+  rename(artists = artistName, song = songTitle)
+```
+
+Since our research focuses on collaborations, we need to understand how the API distinguishes between different artists in a collaborative song. In this case, the delimiters used are "**&**", "**feat**", "**,"** and"**;**". To streamline our process, we will normalize these delimiters by converting them all to a ";" so that we can later split each artist into separate columns. Next, we split the normalized column into multiple columns, each representing a different collaborator and then we add these new columns to the original dataset and remove the normalized column to avoid duplications.
+
+```{r}
+
+data <- data%>%
+  mutate(artistName_normalized = gsub(" & | feat\\. |;|,", ";", artists)) 
+
+
+data_separated <- data %>%
+  separate(artistName_normalized, into = paste0("collaborator", 1:10), sep = ";", fill = "right", extra = "drop")
+
+
+data <- data %>%
+  bind_cols(data_separated %>% select(starts_with("collaborator")))
+
+
+data <- data %>% select(-artistName_normalized)
+```
+
+On the other hand, the API distinguishes artists who have an "&" in their name from those who are collaborating by using "&" instead of just "&". This helps identify whether the "&" is part of the artist's name or indicates a collaboration.
+
+To address cases where "&" appears in the artist's name and is treated as two separate artists, we create a new data frame. In this data frame, we filter the records that contain "&" in the "artists" column, replace "&" with "&", and then separate each collaborator into different columns.
+
+In this case, we excluded "Jose de Rico & Henry Méndez" because, although they are sometimes listed together, they can be considered as two separate artists.
+
+```{r}
+casos_a_modificar <- data %>%
+  filter(grepl("&amp;", artists) & 
+         !artists %in% c("Jose de Rico &amp; Henry Méndez", "Jose de Rico &amp; Henry Méndez;Jay Santos")) %>%
+  mutate(artists = gsub("&amp;", "&", artists)) %>%
+  separate(artists, into = paste0("collaborator", 1:10), sep = ";", fill = "right", extra = "drop", remove = FALSE)
+
+```
+
+We then create a new data frame where the observations matching `casos_a_modificar` based on the "song" column are removed. After that, the corrected observations are added, and "&" is removed from the "artists" and "collaborator1" columns, where these errors were originally present.
+
+```{r}
+data_los40 <- data %>%
+  filter(!song %in% casos_a_modificar$song) %>%
+  bind_rows(casos_a_modificar) %>%
+  mutate(
+    artists = gsub("&amp;", "", artists),       
+    collaborator1 = gsub("&amp", "", collaborator1)  
+  )
+```
+
+Finally, we address specific cases where the same artist is extracted twice, replacing the duplicate with a blank space.
+
+```{r}
+
+data_los40 <- data_los40 %>%
+  mutate(
+    collaborator3 = ifelse(
+      artists %in% c("Robin Schulz;Lilly Wood & The Prick;Robin Schulz", "The Avener;Phoebe Killdeer & The Short Straws;The Avener"),
+      "",  
+      collaborator3  
+    )
+  )
+
+
+```
+
+After this, we will select only the observations that are collaborations of our dataframe:
+
+```{r}
+data_los40 <- data_los40 %>%
+  filter(!is.na(collaborator1) & !is.na(collaborator2))
+```
+
+Once we have the complete database, we save it:
+
+```{r}
+write.csv(data_los40, "data_los40.csv", row.names = FALSE) 
+```
