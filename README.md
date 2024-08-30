@@ -12,11 +12,11 @@ The repository includes the following scripts and data:
 
 ### 1. Scripts
 
-- **`Code_Explanation_API_Los40.py`**: This script extracts data from the Los 40 API. It includes detailed instructions for accessing the API and extracting relevant information, as well as cleaning the obtained data. This script serves as a guide to understand the data extraction and cleaning process for Los 40 data.
+- **`Code_Explanation_API_Los40.Rmd`**: This script extracts data from the Los 40 API. It includes detailed instructions for accessing the API and extracting relevant information, as well as cleaning the obtained data. This script serves as a guide to understand the data extraction and cleaning process for Los 40 data.
 
-- **`Code_Explanation_API_Spotify.py`**: This script extracts data related to musical genres from the Spotify API. It contains instructions for authentication and data retrieval, as well as the data cleaning process. This script serves as a guide to understand the data extraction and cleaning process for Spotify data.
+- **`Code_Explanation_API_Spotify.Rmd`**: This script extracts data related to musical genres from the Spotify API. It contains instructions for authentication and data retrieval, as well as the data cleaning process. This script serves as a guide to understand the data extraction and cleaning process for Spotify data.
 
-- **`Network_Analysis_Code.py`**: This is the main script for performing network analysis. It includes creating edge lists from the extracted data, calculating key network metrics, and generating visualizations of the results.
+- **`Network_Analysis_Code.Rmd`**: This is the main script for performing network analysis. It includes creating edge lists from the extracted data, calculating key network metrics, and generating visualizations of the results.
 
 ### 2. Databases
 
