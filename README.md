@@ -1,8 +1,8 @@
-# MusicCollaborations
+# NETWORK ANALYSIS OF THE EVOLUTION OF MUSICAL COLLABORATIONS BETWEEN ARTISTS AND BETWEEN GENRES OVER THE PAST TWO DECADES
 
 # DESCRIPTION
 
-This project aims to analyze the evolution of musical collaborations between artists and genres over time through network analysis. To achieve this, data is extracted from both Los 40 and Spotify using their APIs, and databases are created for building and analyzing the networks.
+This project aims to analyze the evolution of musical collaborations between the artists and the genres over time through network analysis. To achieve this, data is extracted from both Los 40 and Spotify using their APIs, and databases are created for building and analyzing the networks.
 
 The main script for the project is **`Network_Analysis_Code.py`**, which performs the core network analysis, including creating edge lists from the extracted data, calculating key network metrics, and generating visualizations of the results. The other scripts serve as guides for understanding the data extraction and cleaning processes.
 
